@@ -1,0 +1,38 @@
+# Arduino / Build Artifacts
+build/
+*.bin
+*.elf
+*.hex
+*.map
+*.eep
+*.lst
+*.srec
+*.orig
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Secrets and Local Configurations
+secrets.h
+config.local.h
+*.env
+*.key
+*.pem
+private/

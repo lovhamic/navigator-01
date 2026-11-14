@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spotify Bounce</title>
+  <style>
+    body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#191414; color:#fff; margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+    .card { background:#282828; border-radius:12px; padding:32px; max-width:420px; width:calc(100% - 40px); text-align:center; box-shadow:0 8px 24px rgba(0,0,0,.4); }
+    h1 { font-size:22px; margin:0 0 8px; }
+    p  { color:#b3b3b3; font-size:14px; line-height:1.5; margin:8px 0; }
+    code { background:#3e3e3e; color:#1ed760; padding:2px 6px; border-radius:4px; font-size:13px; word-break:break-all; }
+    .btn { display:block; width:100%; padding:12px; margin-top:14px; border:none; border-radius:6px; background:#1ed760; color:#191414; font-size:15px; font-weight:700; cursor:pointer; }
+    .btn:disabled { opacity:.5; cursor:default; }
+    input { width:100%; padding:10px; margin-top:10px; box-sizing:border-box; border:1px solid #4a4a4a; border-radius:6px; background:#191414; color:#fff; font-size:15px; }
+    .hint { font-size:12px; color:#888; margin-top:10px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Spotify Bounce</h1>
+    <div id="out"></div>
+  </div>
+
+  <script>
+    // Spotify Bounce page.
+    // Spotify redirects the phone browser here after login with
+    //   ?code=<auth code>&state=<ESP32 address>
+    // This page hands the code to the ESP32 by navigating (top-level
+    // redirect) to http://<ESP32 address>/spotify/callback?code=<code>.
+    // A regular <form> or fetch() can't be used because GitHub Pages is
+    // https and the ESP32 is plain-http on the LAN (mixed-content block).
+
+    const params = new URLSearchParams(window.location.search);
+    const code  = params.get('code');
+    const state = params.get('state');
+
+    const allowed = /^[a-z0-9._-]+(\.[a-z0-9._-]+)*(:\d{1,5})?$/i;
+
+    function show(html) {
+      document.getElementById('out').innerHTML = html;
+    }
+
+    function forward(host) {
+      if (!/^[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]{1,5})?$/.test(host.trim())) {
+        show('<p>That doesn\'t look like an ESP32 address (e.g. 192.168.4.1 or 192.168.1.50).</p>' + manualForm());
+        return;
+      }
+      const target = 'http://' + host.trim() + '/spotify/callback?code=' + encodeURIComponent(code);
+      window.location.href = target;
+    }
+
+    function manualLink() {
+      return '<p><code>' + code + '</code></p>' +
+             '<p>If the redirect below fails, copy the code or open this link on the phone:</p>' +
+             '<p><code id="manualUrl">~</code></p>' +
+             '<button class="btn" onclick="copyManual()">Copy link</button>';
+    }
+
+    function manualForm() {
+      return '<p>Enter the ESP32 address to send the code to</p>' +
+             '<input id="host" type="text" placeholder="e.g. 192.168.4.1" value="' + (localStorage.getItem('espHost') || '') + '">' +
+             '<button class="btn" onclick="forward(document.getElementById(\'host\').value)">Send code to ESP32</button>';
+    }
+
+    function copyManual() {
+      const el = document.getElementById('manualUrl');
+      const txt = el.textContent;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(txt).then(function () { el.textContent = txt + ' (copied)'; });
+      }
+    }
+
+    if (!code) {
+      show('<p>No authorization code here. This page is normally opened by the ESP32 control panel\'s <b>Connect Spotify</b> button.</p>' +
+           '<p>If you arrived manually, there is nothing to do — go back to the ESP32 control panel and tap <b>Connect Spotify</b>.</p>');
+      return;
+    }
+
+    if (state && allowed.test(state)) {
+      localStorage.setItem('espHost', state);
+      show('<p>Got the auth code. Sending it to the ESP32 at <code>' + state + '</code>…</p>' +
+           '<button class="btn" disabled>Sending…</button>' +
+           '<p class="hint">If nothing happens, use the form below.</p>' + manualForm() + manualLink());
+      const target = 'http://' + state + '/spotify/callback?code=' + encodeURIComponent(code);
+      document.getElementById('manualUrl').textContent = target;
+      setTimeout(function () { window.location.href = target; }, 500);
+    } else {
+      show('<p>Got the auth code, but the ESP32 address wasn\'t included in the link.</p>' + manualForm() + manualLink());
+      const saved = localStorage.getItem('espHost');
+      document.getElementById('manualUrl').textContent =
+        'http://' + (saved || 'ESP32-ADDRESS') + '/spotify/callback?code=' + encodeURIComponent(code);
+    }
+  </script>
+</body>
+</html>

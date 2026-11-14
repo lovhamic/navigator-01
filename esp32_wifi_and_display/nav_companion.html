@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<!--
+  nav_companion.html
+
+  WHY THIS FILE IS SEPARATE FROM THE ESP32:
+  Browsers only allow GPS access (navigator.geolocation) on a "secure
+  context" - basically https:// (or localhost). The ESP32's own control
+  panel is plain http:// on your LAN, so it can't ask for your location
+  directly. This page does the GPS + Google Maps work, then pushes just
+  the result (a direction + a distance) to the ESP32 over your WiFi.
+
+  SETUP:
+  1. Get a Google Maps JavaScript API key (Google Cloud Console -> APIs &
+     Services -> Credentials). Enable "Maps JavaScript API" on the project.
+     This requires billing to be enabled on the Google Cloud project, but
+     Google gives a recurring free monthly credit that comfortably covers
+     casual personal use.
+  2. Paste that key into GOOGLE_MAPS_API_KEY below.
+  3. Host this file somewhere https:// (GitHub Pages, Netlify Drop,
+     Cloudflare Pages - all free). Open the hosted link on your phone.
+  4. On the page, enter your ESP32's local IP (shown on the device's own
+     web control panel, e.g. 192.168.1.50) and a destination, then
+     "Start Navigating". Keep this tab open while you drive/walk.
+-->
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nav Companion</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#f2f2f2; margin:0; padding:20px; }
+    .card { background:#fff; max-width:420px; margin:auto; padding:20px; border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,0.15); }
+    h2 { text-align:center; color:#333; margin-top:0; }
+    input { width:100%; padding:8px; margin-top:6px; border:1px solid #ccc; border-radius:6px; box-sizing:border-box; }
+    label { display:block; margin-top:14px; font-size:13px; color:#555; font-weight:bold; }
+    button { width:100%; padding:10px; margin-top:14px; border:none; border-radius:6px; background:#2196F3; color:#fff; font-size:16px; cursor:pointer; }
+    button:disabled { background:#aaa; }
+    #map { width:100%; height:220px; margin-top:14px; border-radius:6px; }
+    #statusBox { margin-top:14px; text-align:center; font-weight:bold; }
+    .hint { color:#888; font-size:12px; margin:4px 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Navigation Companion</h2>
+    <p class="hint">Keep this tab open while navigating - it relays turns to your device.</p>
+
+    <label for="deviceIp">ESP32 device address</label>
+    <input type="text" id="deviceIp" placeholder="e.g. 192.168.1.50">
+
+    <label for="destInput">Destination</label>
+    <input type="text" id="destInput" placeholder="Address or place name">
+
+    <button id="startBtn" onclick="startNav()">Start Navigating</button>
+    <button id="stopBtn" onclick="stopNav()" style="display:none; background:#e53935;">Stop</button>
+
+    <div id="map"></div>
+    <div id="statusBox">Not navigating</div>
+  </div>
+
+<script>
+const GOOGLE_MAPS_API_KEY = "PASTE_YOUR_GOOGLE_MAPS_API_KEY_HERE";
+
+let map, directionsService, directionsRenderer, watchId;
+let currentSteps = [];
+let currentStepIndex = 0;
+let lastSentMs = 0;
+const SEND_INTERVAL_MS = 3000;
+const STEP_ADVANCE_RADIUS_M = 20; // close enough to a turn to consider it "done"
+
+// Google's own maneuver strings collapsed down to what the device understands.
+function simplifyManeuver(m) {
+  if (!m) return "straight";
+  if (m.indexOf("sharp-left") >= 0) return "sharp-left";
+  if (m.indexOf("sharp-right") >= 0) return "sharp-right";
+  if (m.indexOf("slight-left") >= 0) return "slight-left";
+  if (m.indexOf("slight-right") >= 0) return "slight-right";
+  if (m.indexOf("uturn") >= 0) return "uturn";
+  if (m.indexOf("left") >= 0) return "left";
+  if (m.indexOf("right") >= 0) return "right";
+  return "straight";
+}
+
+function haversineMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function loadGoogleMaps(callback) {
+  if (window.google && window.google.maps) { callback(); return; }
+  const script = document.createElement('script');
+  script.src = "https://maps.googleapis.com/maps/api/js?key=" + GOOGLE_MAPS_API_KEY;
+  script.onload = callback;
+  document.head.appendChild(script);
+}
+
+function sendToDevice(dir, meters) {
+  const ip = document.getElementById('deviceIp').value.trim();
+  if (!ip) return;
+  fetch('http://' + ip + '/nav/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'dir=' + encodeURIComponent(dir) + '&meters=' + Math.round(meters)
+  }).catch(() => {
+    document.getElementById('statusBox').innerText = "Can't reach device - check IP/WiFi";
+  });
+}
+
+function onPosition(pos) {
+  const { latitude, longitude } = pos.coords;
+  if (!currentSteps.length) return;
+
+  // Advance past any step we've effectively already reached.
+  while (currentStepIndex < currentSteps.length - 1) {
+    const step = currentSteps[currentStepIndex];
+    const d = haversineMeters(latitude, longitude, step.end_location.lat(), step.end_location.lng());
+    if (d < STEP_ADVANCE_RADIUS_M) {
+      currentStepIndex++;
+    } else {
+      break;
+    }
+  }
+
+  const step = currentSteps[currentStepIndex];
+  const isLastStep = currentStepIndex === currentSteps.length - 1;
+  const distToTurn = haversineMeters(latitude, longitude, step.end_location.lat(), step.end_location.lng());
+
+  let dir, meters;
+  if (isLastStep && distToTurn < STEP_ADVANCE_RADIUS_M) {
+    dir = "arrive";
+    meters = 0;
+  } else {
+    dir = simplifyManeuver(step.maneuver);
+    meters = distToTurn;
+  }
+
+  document.getElementById('statusBox').innerText =
+    dir === "arrive" ? "Arrived!" : ("Next: " + dir + ", " + Math.round(meters) + " m");
+
+  const now = Date.now();
+  if (now - lastSentMs >= SEND_INTERVAL_MS) {
+    lastSentMs = now;
+    sendToDevice(dir, meters);
+  }
+}
+
+function startNav() {
+  const dest = document.getElementById('destInput').value.trim();
+  const ip = document.getElementById('deviceIp').value.trim();
+  if (!dest || !ip) {
+    alert("Enter both the device address and a destination.");
+    return;
+  }
+
+  loadGoogleMaps(() => {
+    map = new google.maps.Map(document.getElementById('map'), { zoom: 15, center: { lat: 0, lng: 0 } });
+    directionsService = new google.maps.DirectionsService();
+    directionsRenderer = new google.maps.DirectionsRenderer({ map });
+
+    navigator.geolocation.getCurrentPosition((pos) => {
+      const origin = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      directionsService.route(
+        { origin, destination: dest, travelMode: google.maps.TravelMode.DRIVING },
+        (result, status) => {
+          if (status !== "OK") {
+            alert("Could not get directions: " + status);
+            return;
+          }
+          directionsRenderer.setDirections(result);
+          currentSteps = result.routes[0].legs[0].steps;
+          currentStepIndex = 0;
+
+          document.getElementById('startBtn').style.display = 'none';
+          document.getElementById('stopBtn').style.display = 'block';
+
+          watchId = navigator.geolocation.watchPosition(onPosition, () => {}, {
+            enableHighAccuracy: true, maximumAge: 2000, timeout: 10000
+          });
+        }
+      );
+    }, () => alert("Couldn't get your location - allow location access and try again."));
+  });
+}
+
+function stopNav() {
+  if (watchId) navigator.geolocation.clearWatch(watchId);
+  currentSteps = [];
+  currentStepIndex = 0;
+  document.getElementById('startBtn').style.display = 'block';
+  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('statusBox').innerText = "Not navigating";
+
+  const ip = document.getElementById('deviceIp').value.trim();
+  if (ip) {
+    fetch('http://' + ip + '/nav/clear', { method: 'GET' }).catch(() => {});
+  }
+}
+</script>
+</body>
+</html>
